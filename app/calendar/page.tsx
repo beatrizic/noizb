@@ -1,20 +1,27 @@
 // app/calendar/page.tsx
 "use client";
 
-import React, { useMemo, useState, type ReactElement } from "react";
+import React, {
+  useMemo,
+  useState,
+  type ReactElement,
+  type FormEvent,
+} from "react";
 
 type EventScope = "personal" | "couple";
 
 interface CalendarEvent {
   id: string;
   title: string;
-  date: string; // ISO string "YYYY-MM-DD"
+  date: string; // ISO "YYYY-MM-DD"
   time?: string; // "HH:MM"
   createdByProfileId: string;
   scope: EventScope;
 }
 
 type EventFilter = "all" | "me" | "partner" | "couple";
+type NewEventOwner = "me" | "partner" | "couple";
+type EventSheetMode = "create" | "edit";
 
 interface CalendarDay {
   date: Date;
@@ -75,19 +82,18 @@ function getMonthLabel(date: Date): string {
 // Settimana che parte da lunedì (stile EU/iOS)
 function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
   const year = viewDate.getFullYear();
-  const month = viewDate.getMonth(); // 0-11
+  const month = viewDate.getMonth();
 
   const firstOfMonth = new Date(year, month, 1);
   const lastOfMonth = new Date(year, month + 1, 0);
   const daysInMonth = lastOfMonth.getDate();
 
-  // getDay(): 0 = Sunday, 1 = Monday, ...
-  // Normalizziamo a lunedì = 0
+  // getDay(): 0 Sunday → normalizziamo a Monday = 0
   const firstWeekday = (firstOfMonth.getDay() + 6) % 7;
 
   const days: CalendarDay[] = [];
 
-  // Giorni del mese precedente da mostrare all'inizio
+  // Giorni del mese precedente
   if (firstWeekday > 0) {
     const prevMonthLastDay = new Date(year, month, 0).getDate();
     for (let i = firstWeekday - 1; i >= 0; i--) {
@@ -107,7 +113,7 @@ function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
     });
   }
 
-  // Giorni del mese successivo per completare la griglia (6 settimane x 7 giorni)
+  // Giorni del mese successivo per completare la griglia (6x7)
   const totalCells = 6 * 7;
   const remaining = totalCells - days.length;
   for (let i = 1; i <= remaining; i++) {
@@ -117,7 +123,6 @@ function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
     });
   }
 
-  // Spezzetta in settimane
   const weeks: CalendarDay[][] = [];
   for (let i = 0; i < totalCells; i += 7) {
     weeks.push(days.slice(i, i + 7));
@@ -133,8 +138,9 @@ function getEventCategory(
 ): EventFilter {
   if (event.scope === "couple") return "couple";
   if (event.createdByProfileId === currentUserId) return "me";
-  if (partnerProfileId && event.createdByProfileId === partnerProfileId) return "partner";
-  // fallback
+  if (partnerProfileId && event.createdByProfileId === partnerProfileId) {
+    return "partner";
+  }
   return "me";
 }
 
@@ -151,7 +157,6 @@ function filterEvents(
     if (event.date !== selectedISO) return false;
 
     const category = getEventCategory(event, currentUserId, partnerProfileId);
-
     if (filter === "all") return true;
     return category === filter;
   });
@@ -165,8 +170,18 @@ export default function CalendarPage(): ReactElement {
   const [selectedDate, setSelectedDate] = useState<Date>(today);
   const [filter, setFilter] = useState<EventFilter>("all");
 
-  // TODO: sostituisci MOCK_EVENTS con dati da Supabase filtrati per coppia
-  const events = MOCK_EVENTS;
+  // Stato eventi (mock iniziale + modifiche locali)
+  const [events, setEvents] = useState<CalendarEvent[]>(MOCK_EVENTS);
+
+  // Stato bottom sheet evento (create/edit)
+  const [isSheetOpen, setIsSheetOpen] = useState<boolean>(false);
+  const [sheetMode, setSheetMode] = useState<EventSheetMode>("create");
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+
+  // Form campi
+  const [newTitle, setNewTitle] = useState<string>("");
+  const [newTime, setNewTime] = useState<string>("");
+  const [newOwner, setNewOwner] = useState<NewEventOwner>("couple");
 
   const weeks = useMemo(() => generateCalendarMatrix(viewDate), [viewDate]);
 
@@ -185,7 +200,6 @@ export default function CalendarPage(): ReactElement {
 
   const handleSelectDay = (day: Date): void => {
     setSelectedDate(day);
-    // Se cambio mese selezionando un giorno fuori mese, aggiorno anche il mese in vista
     setViewDate(new Date(day.getFullYear(), day.getMonth(), 1));
   };
 
@@ -196,7 +210,6 @@ export default function CalendarPage(): ReactElement {
 
   const getDotsForDay = (day: Date): { me: boolean; partner: boolean; couple: boolean } => {
     const dayISO = toISODate(day);
-
     const dots = { me: false, partner: false, couple: false };
 
     events.forEach((event) => {
@@ -219,6 +232,88 @@ export default function CalendarPage(): ReactElement {
       }).format(selectedDate),
     [selectedDate]
   );
+
+  const openNewEventSheet = (): void => {
+    setSheetMode("create");
+    setEditingEventId(null);
+    setNewTitle("");
+    setNewTime("");
+    setNewOwner("couple");
+    setIsSheetOpen(true);
+  };
+
+  const openEditEventSheet = (event: CalendarEvent): void => {
+    setSheetMode("edit");
+    setEditingEventId(event.id);
+    setNewTitle(event.title);
+    setNewTime(event.time ?? "");
+    const category = getEventCategory(event, CURRENT_USER_ID, PARTNER_PROFILE_ID);
+    // mappo categoria → owner per il form
+    let owner: NewEventOwner;
+    if (category === "couple") owner = "couple";
+    else if (category === "partner") owner = "partner";
+    else owner = "me";
+    setNewOwner(owner);
+    setIsSheetOpen(true);
+  };
+
+  const closeEventSheet = (): void => {
+    setIsSheetOpen(false);
+  };
+
+  const handleSubmitEvent = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    const trimmedTitle = newTitle.trim();
+    if (!trimmedTitle) return;
+
+    let scope: EventScope;
+    let createdByProfileId: string;
+
+    if (newOwner === "couple") {
+      scope = "couple";
+      createdByProfileId = CURRENT_USER_ID;
+    } else {
+      scope = "personal";
+      createdByProfileId =
+        newOwner === "me"
+          ? CURRENT_USER_ID
+          : PARTNER_PROFILE_ID || CURRENT_USER_ID;
+    }
+
+    if (sheetMode === "create") {
+      const newEvent: CalendarEvent = {
+        id: `local-${Date.now()}`,
+        title: trimmedTitle,
+        date: toISODate(selectedDate),
+        time: newTime || undefined,
+        createdByProfileId,
+        scope,
+      };
+      setEvents((prev) => [...prev, newEvent]);
+    } else if (sheetMode === "edit" && editingEventId) {
+      setEvents((prev) =>
+        prev.map((ev) =>
+          ev.id === editingEventId
+            ? {
+                ...ev,
+                title: trimmedTitle,
+                time: newTime || undefined,
+                createdByProfileId,
+                scope,
+              }
+            : ev
+        )
+      );
+    }
+
+    setIsSheetOpen(false);
+  };
+
+  const handleDeleteEvent = (): void => {
+    if (!editingEventId) return;
+    setEvents((prev) => prev.filter((ev) => ev.id !== editingEventId));
+    setIsSheetOpen(false);
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 flex flex-col pb-20">
@@ -335,7 +430,6 @@ export default function CalendarPage(): ReactElement {
                     <span className="leading-none">
                       {day.date.getDate()}
                     </span>
-                    {/* Puntini eventi */}
                     <div className="mt-1 flex gap-[2px]">
                       {dots.me && (
                         <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
@@ -364,10 +458,10 @@ export default function CalendarPage(): ReactElement {
               {selectedDateLabel}
             </span>
           </div>
-          {/* Integrazione futura: tasto "Nuovo evento" */}
           <button
             type="button"
             className="text-[11px] px-3 py-1 rounded-full bg-slate-100 text-slate-900 font-medium"
+            onClick={openNewEventSheet}
           >
             + Nuovo
           </button>
@@ -402,7 +496,10 @@ export default function CalendarPage(): ReactElement {
               return (
                 <li
                   key={event.id}
-                  className="rounded-2xl bg-slate-900/80 border border-slate-800 px-3 py-2.5 flex items-start justify-between"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openEditEventSheet(event)}
+                  className="rounded-2xl bg-slate-900/80 border border-slate-800 px-3 py-2.5 flex items-start justify-between cursor-pointer active:scale-[0.99] transition"
                 >
                   <div className="flex flex-col">
                     <span className="text-sm font-medium">{event.title}</span>
@@ -423,6 +520,121 @@ export default function CalendarPage(): ReactElement {
           </ul>
         )}
       </section>
+
+      {/* Bottom sheet crea/modifica evento */}
+      {isSheetOpen && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50">
+          <div
+            className="absolute inset-0"
+            onClick={closeEventSheet}
+            aria-hidden="true"
+          />
+          <form
+            onSubmit={handleSubmitEvent}
+            className="relative w-full max-w-md mx-auto rounded-t-3xl bg-slate-950 border-t border-slate-800 px-4 pt-3 pb-5 shadow-2xl"
+          >
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-700" />
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm font-medium">
+                {sheetMode === "create" ? "Nuovo evento" : "Modifica evento"}
+              </span>
+              <button
+                type="button"
+                className="text-[11px] text-slate-400"
+                onClick={closeEventSheet}
+              >
+                Chiudi
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-slate-400">Titolo</label>
+                <input
+                  type="text"
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  placeholder="Es. Cena, visita, appuntamento..."
+                  className="w-full rounded-2xl bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400/60"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-slate-400">
+                  Ora (opzionale)
+                </label>
+                <input
+                  type="time"
+                  value={newTime}
+                  onChange={(e) => setNewTime(e.target.value)}
+                  className="w-32 rounded-2xl bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/60"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-slate-400">
+                  A chi appartiene
+                </label>
+                <div className="grid grid-cols-3 gap-1 bg-slate-900 rounded-full p-1 text-[11px]">
+                  <ToggleChip
+                    label="Io"
+                    active={newOwner === "me"}
+                    onClick={() => setNewOwner("me")}
+                    className="bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  />
+                  <ToggleChip
+                    label="Partner"
+                    active={newOwner === "partner"}
+                    onClick={() => setNewOwner("partner")}
+                    className="bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                  />
+                  <ToggleChip
+                    label="Coppia"
+                    active={newOwner === "couple"}
+                    onClick={() => setNewOwner("couple")}
+                    className="bg-pink-500/20 text-pink-300 border-pink-500/40"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>Data</span>
+                <span className="font-medium capitalize">
+                  {selectedDateLabel}
+                </span>
+              </div>
+
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={closeEventSheet}
+                  className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 rounded-2xl bg-slate-100 text-slate-900 px-3 py-2 text-sm font-medium disabled:opacity-40"
+                  disabled={!newTitle.trim()}
+                >
+                  {sheetMode === "create" ? "Salva" : "Aggiorna"}
+                </button>
+              </div>
+
+              {sheetMode === "edit" && (
+                <button
+                  type="button"
+                  onClick={handleDeleteEvent}
+                  className="mt-2 w-full rounded-2xl border border-red-500/60 bg-red-500/5 px-3 py-2 text-sm text-red-300"
+                >
+                  Elimina evento
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
@@ -469,5 +681,34 @@ function LegendDot({ className, label }: LegendDotProps): ReactElement {
       <span className={`h-2 w-2 rounded-full ${className}`} />
       <span>{label}</span>
     </div>
+  );
+}
+
+interface ToggleChipProps {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  className: string;
+}
+
+function ToggleChip({
+  label,
+  active,
+  onClick,
+  className,
+}: ToggleChipProps): ReactElement {
+  const activeClasses = className;
+  const inactiveClasses = "bg-transparent text-slate-400 border border-transparent";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-2 py-1 text-center font-medium transition ${
+        active ? activeClasses : inactiveClasses
+      }`}
+    >
+      {label}
+    </button>
   );
 }
