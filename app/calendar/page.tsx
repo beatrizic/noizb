@@ -4,9 +4,11 @@
 import React, {
   useMemo,
   useState,
+  useEffect,
   type ReactElement,
   type FormEvent,
 } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 type EventScope = "personal" | "couple";
 
@@ -28,45 +30,39 @@ interface CalendarDay {
   inCurrentMonth: boolean;
 }
 
-// TODO: collega questi ID a Supabase (utente loggato + partner)
-const CURRENT_USER_ID = "me-profile-id";
-const PARTNER_PROFILE_ID = "partner-profile-id";
+interface CalendarEventRow {
+  id: string;
+  title: string;
+  date: string;
+  time: string | null;
+  scope: EventScope;
+  created_by_profile_id: string;
+  couple_id: string | null;
+}
 
-// TODO: sostituisci questi mock con una query a Supabase
-const MOCK_EVENTS: CalendarEvent[] = [
-  {
-    id: "1",
-    title: "Cena insieme",
-    date: "2025-12-03",
-    time: "20:00",
-    createdByProfileId: CURRENT_USER_ID,
-    scope: "couple",
-  },
-  {
-    id: "2",
-    title: "Dentista Bea",
-    date: "2025-12-04",
-    time: "15:30",
-    createdByProfileId: CURRENT_USER_ID,
-    scope: "personal",
-  },
-  {
-    id: "3",
-    title: "Allenamento Kekko",
-    date: "2025-12-04",
-    time: "18:00",
-    createdByProfileId: PARTNER_PROFILE_ID,
-    scope: "personal",
-  },
-  {
-    id: "4",
-    title: "Weekend fuori",
-    date: "2025-12-08",
-    time: "09:00",
-    createdByProfileId: CURRENT_USER_ID,
-    scope: "couple",
-  },
-];
+interface ProfileRow {
+  id: string;
+  couple_id: string | null;
+}
+
+interface CoupleMemberRow {
+  profile_id: string;
+  couple_id: string;
+}
+
+// ENV Supabase
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    "Supabase env vars mancanti: NEXT_PUBLIC_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_ANON_KEY"
+  );
+}
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+const weekdayLabels = ["L", "M", "M", "G", "V", "S", "D"];
 
 function toISODate(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -79,7 +75,7 @@ function getMonthLabel(date: Date): string {
   }).format(date);
 }
 
-// Settimana che parte da lunedì (stile EU/iOS)
+// Settimana che parte da lunedì
 function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth();
@@ -88,7 +84,6 @@ function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
   const lastOfMonth = new Date(year, month + 1, 0);
   const daysInMonth = lastOfMonth.getDate();
 
-  // getDay(): 0 Sunday → normalizziamo a Monday = 0
   const firstWeekday = (firstOfMonth.getDay() + 6) % 7;
 
   const days: CalendarDay[] = [];
@@ -113,7 +108,7 @@ function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
     });
   }
 
-  // Giorni del mese successivo per completare la griglia (6x7)
+  // Giorni successivi per completare 6x7
   const totalCells = 6 * 7;
   const remaining = totalCells - days.length;
   for (let i = 1; i <= remaining; i++) {
@@ -131,13 +126,24 @@ function generateCalendarMatrix(viewDate: Date): CalendarDay[][] {
   return weeks;
 }
 
+function mapRowToEvent(row: CalendarEventRow): CalendarEvent {
+  return {
+    id: row.id,
+    title: row.title,
+    date: row.date,
+    time: row.time ?? undefined,
+    createdByProfileId: row.created_by_profile_id,
+    scope: row.scope,
+  };
+}
+
 function getEventCategory(
   event: CalendarEvent,
-  currentUserId: string,
-  partnerProfileId: string | null
+  currentUserId?: string | null,
+  partnerProfileId?: string | null
 ): EventFilter {
   if (event.scope === "couple") return "couple";
-  if (event.createdByProfileId === currentUserId) return "me";
+  if (currentUserId && event.createdByProfileId === currentUserId) return "me";
   if (partnerProfileId && event.createdByProfileId === partnerProfileId) {
     return "partner";
   }
@@ -148,8 +154,8 @@ function filterEvents(
   events: CalendarEvent[],
   selectedDate: Date,
   filter: EventFilter,
-  currentUserId: string,
-  partnerProfileId: string | null
+  currentUserId?: string | null,
+  partnerProfileId?: string | null
 ): CalendarEvent[] {
   const selectedISO = toISODate(selectedDate);
 
@@ -162,40 +168,157 @@ function filterEvents(
   });
 }
 
-const weekdayLabels = ["L", "M", "M", "G", "V", "S", "D"];
-
 export default function CalendarPage(): ReactElement {
   const today = useMemo(() => new Date(), []);
   const [viewDate, setViewDate] = useState<Date>(today);
   const [selectedDate, setSelectedDate] = useState<Date>(today);
   const [filter, setFilter] = useState<EventFilter>("all");
 
-  // Stato eventi (mock iniziale + modifiche locali)
-  const [events, setEvents] = useState<CalendarEvent[]>(MOCK_EVENTS);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [partnerProfileId, setPartnerProfileId] = useState<string | null>(null);
+  const [coupleId, setCoupleId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Stato bottom sheet evento (create/edit)
   const [isSheetOpen, setIsSheetOpen] = useState<boolean>(false);
   const [sheetMode, setSheetMode] = useState<EventSheetMode>("create");
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [isEditingExisting, setIsEditingExisting] = useState<boolean>(false);
 
-  // Form campi
   const [newTitle, setNewTitle] = useState<string>("");
   const [newTime, setNewTime] = useState<string>("");
   const [newOwner, setNewOwner] = useState<NewEventOwner>("couple");
+  const [eventDate, setEventDate] = useState<string>(toISODate(today));
 
   const weeks = useMemo(() => generateCalendarMatrix(viewDate), [viewDate]);
 
   const eventsForSelectedDay = useMemo(
-    () => filterEvents(events, selectedDate, filter, CURRENT_USER_ID, PARTNER_PROFILE_ID),
-    [events, selectedDate, filter]
+    () =>
+      filterEvents(
+        events,
+        selectedDate,
+        filter,
+        currentUserId,
+        partnerProfileId
+      ),
+    [events, selectedDate, filter, currentUserId, partnerProfileId]
   );
 
+  const selectedDateLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat("it-IT", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      }).format(selectedDate),
+    [selectedDate]
+  );
+
+  const eventDateLabel = useMemo(() => {
+    const baseDate = eventDate ? new Date(eventDate) : selectedDate;
+    return new Intl.DateTimeFormat("it-IT", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    }).format(baseDate);
+  }, [eventDate, selectedDate]);
+
+  // Load user + profilo + partner + eventi (calendar_events)
+  useEffect(() => {
+    const loadData = async (): Promise<void> => {
+      setIsLoading(true);
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        console.warn("Errore getUser", userError);
+        setIsLoading(false);
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .select("id, couple_id")
+        .eq("id", user.id)
+        .maybeSingle<ProfileRow>();
+
+      if (profileError) {
+        console.warn("Errore profilo", profileError);
+      }
+
+      if (!profile) {
+        setCurrentUserId(user.id);
+        setCoupleId(null);
+        setIsLoading(false);
+        return;
+      }
+
+      setCurrentUserId(profile.id);
+      setCoupleId(profile.couple_id);
+
+      let partnerId: string | null = null;
+
+      if (profile.couple_id) {
+        const { data: members, error: membersError } = await supabase
+          .from("couple_members")
+          .select("profile_id, couple_id")
+          .eq("couple_id", profile.couple_id);
+
+        if (!membersError && members && members.length > 0) {
+          const others = (members as CoupleMemberRow[]).filter(
+            (m) => m.profile_id !== profile.id
+          );
+          partnerId = others[0]?.profile_id ?? null;
+        } else if (membersError) {
+          console.warn("Errore couple_members", membersError);
+        }
+      }
+
+      setPartnerProfileId(partnerId);
+
+      let eventsQuery = supabase
+        .from("calendar_events")
+        .select(
+          "id, title, date, time, scope, created_by_profile_id, couple_id"
+        )
+        .order("date", { ascending: true })
+        .order("time", { ascending: true });
+
+      if (profile.couple_id) {
+        eventsQuery = eventsQuery.eq("couple_id", profile.couple_id);
+      } else {
+        eventsQuery = eventsQuery.eq("created_by_profile_id", profile.id);
+      }
+
+      const { data: eventsData, error: eventsError } = await eventsQuery;
+
+      if (!eventsError && eventsData) {
+        const mapped = (eventsData as CalendarEventRow[]).map(mapRowToEvent);
+        setEvents(mapped);
+      } else if (eventsError) {
+        console.warn("Errore caricamento eventi", eventsError);
+      }
+
+      setIsLoading(false);
+    };
+
+    void loadData();
+  }, []);
+
   const handlePrevMonth = (): void => {
-    setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
+    setViewDate(
+      (prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1)
+    );
   };
 
   const handleNextMonth = (): void => {
-    setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
+    setViewDate(
+      (prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1)
+    );
   };
 
   const handleSelectDay = (day: Date): void => {
@@ -208,13 +331,17 @@ export default function CalendarPage(): ReactElement {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate();
 
-  const getDotsForDay = (day: Date): { me: boolean; partner: boolean; couple: boolean } => {
+  const getDotsForDay = (day: Date): {
+    me: boolean;
+    partner: boolean;
+    couple: boolean;
+  } => {
     const dayISO = toISODate(day);
     const dots = { me: false, partner: false, couple: false };
 
     events.forEach((event) => {
       if (event.date !== dayISO) return;
-      const category = getEventCategory(event, CURRENT_USER_ID, PARTNER_PROFILE_ID);
+      const category = getEventCategory(event, currentUserId, partnerProfileId);
       if (category === "me") dots.me = true;
       if (category === "partner") dots.partner = true;
       if (category === "couple") dots.couple = true;
@@ -223,22 +350,14 @@ export default function CalendarPage(): ReactElement {
     return dots;
   };
 
-  const selectedDateLabel = useMemo(
-    () =>
-      new Intl.DateTimeFormat("it-IT", {
-        weekday: "long",
-        day: "numeric",
-        month: "long",
-      }).format(selectedDate),
-    [selectedDate]
-  );
-
   const openNewEventSheet = (): void => {
     setSheetMode("create");
     setEditingEventId(null);
     setNewTitle("");
     setNewTime("");
     setNewOwner("couple");
+    setEventDate(toISODate(selectedDate));
+    setIsEditingExisting(true); // irrilevante in create, ma teniamo true
     setIsSheetOpen(true);
   };
 
@@ -247,13 +366,14 @@ export default function CalendarPage(): ReactElement {
     setEditingEventId(event.id);
     setNewTitle(event.title);
     setNewTime(event.time ?? "");
-    const category = getEventCategory(event, CURRENT_USER_ID, PARTNER_PROFILE_ID);
-    // mappo categoria → owner per il form
+    const category = getEventCategory(event, currentUserId, partnerProfileId);
     let owner: NewEventOwner;
     if (category === "couple") owner = "couple";
     else if (category === "partner") owner = "partner";
     else owner = "me";
     setNewOwner(owner);
+    setEventDate(event.date);
+    setIsEditingExisting(false); // inizialmente solo visualizzazione
     setIsSheetOpen(true);
   };
 
@@ -261,36 +381,96 @@ export default function CalendarPage(): ReactElement {
     setIsSheetOpen(false);
   };
 
-  const handleSubmitEvent = (event: FormEvent<HTMLFormElement>): void => {
-    event.preventDefault();
+  const ensureCurrentUserId = async (): Promise<string | null> => {
+    if (currentUserId) return currentUserId;
+
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+
+    if (error || !user) {
+      console.warn("Impossibile recuperare user per inserimento evento", error);
+      alert("Problema con l'autenticazione. Riprova tra poco.");
+      return null;
+    }
+
+    setCurrentUserId(user.id);
+    return user.id;
+  };
+
+  const handleSubmitEvent = async (
+    e: FormEvent<HTMLFormElement>
+  ): Promise<void> => {
+    e.preventDefault();
     const trimmedTitle = newTitle.trim();
     if (!trimmedTitle) return;
+
+    const userId = await ensureCurrentUserId();
+    if (!userId) return;
+
+    const dateToUse = eventDate || toISODate(selectedDate);
 
     let scope: EventScope;
     let createdByProfileId: string;
 
     if (newOwner === "couple") {
       scope = "couple";
-      createdByProfileId = CURRENT_USER_ID;
+      createdByProfileId = userId;
     } else {
       scope = "personal";
       createdByProfileId =
-        newOwner === "me"
-          ? CURRENT_USER_ID
-          : PARTNER_PROFILE_ID || CURRENT_USER_ID;
+        newOwner === "me" ? userId : partnerProfileId || userId;
     }
 
+    const basePayload = {
+      title: trimmedTitle,
+      date: dateToUse,
+      time: newTime || null,
+      scope,
+      created_by_profile_id: createdByProfileId,
+      couple_id: coupleId,
+    };
+
     if (sheetMode === "create") {
-      const newEvent: CalendarEvent = {
-        id: `local-${Date.now()}`,
+      const tempId = `local-${Date.now()}`;
+      const optimisticEvent: CalendarEvent = {
+        id: tempId,
         title: trimmedTitle,
-        date: toISODate(selectedDate),
+        date: dateToUse,
         time: newTime || undefined,
         createdByProfileId,
         scope,
       };
-      setEvents((prev) => [...prev, newEvent]);
+      setEvents((prev) => [...prev, optimisticEvent]);
+
+      const { data, error } = await supabase
+        .from("calendar_events")
+        .insert(basePayload)
+        .select(
+          "id, title, date, time, scope, created_by_profile_id, couple_id"
+        )
+        .single<CalendarEventRow>();
+
+      if (error || !data) {
+        console.warn("Errore inserimento evento", error);
+        alert(
+          `Errore durante il salvataggio dell'evento${
+            (error as any)?.message ? `: ${(error as any).message}` : ""
+          }`
+        );
+        setEvents((prev) => prev.filter((ev) => ev.id !== tempId));
+      } else {
+        const saved = mapRowToEvent(data);
+        setEvents((prev) =>
+          prev.map((ev) => (ev.id === tempId ? saved : ev))
+        );
+      }
     } else if (sheetMode === "edit" && editingEventId) {
+      if (!isEditingExisting) {
+        return;
+      }
+
       setEvents((prev) =>
         prev.map((ev) =>
           ev.id === editingEventId
@@ -298,21 +478,119 @@ export default function CalendarPage(): ReactElement {
                 ...ev,
                 title: trimmedTitle,
                 time: newTime || undefined,
+                date: dateToUse,
                 createdByProfileId,
                 scope,
               }
             : ev
         )
       );
+
+      const { data, error } = await supabase
+        .from("calendar_events")
+        .update(basePayload)
+        .eq("id", editingEventId)
+        .select(
+          "id, title, date, time, scope, created_by_profile_id, couple_id"
+        )
+        .single<CalendarEventRow>();
+
+      if (error || !data) {
+        console.warn("Errore aggiornamento evento", error);
+        alert(
+          `Errore durante l'aggiornamento dell'evento${
+            (error as any)?.message ? `: ${(error as any).message}` : ""
+          }`
+        );
+      } else {
+        const updated = mapRowToEvent(data);
+        setEvents((prev) =>
+          prev.map((ev) => (ev.id === editingEventId ? updated : ev))
+        );
+      }
+      setIsEditingExisting(false);
+    }
+
+    // dopo salvataggio porto il calendario sul giorno dell'evento
+    const targetDate = new Date(dateToUse);
+    if (!Number.isNaN(targetDate.getTime())) {
+      setSelectedDate(targetDate);
+      setViewDate(
+        new Date(targetDate.getFullYear(), targetDate.getMonth(), 1)
+      );
     }
 
     setIsSheetOpen(false);
   };
 
-  const handleDeleteEvent = (): void => {
+  const handleDeleteEvent = async (): Promise<void> => {
     if (!editingEventId) return;
+
+    const previous = events;
     setEvents((prev) => prev.filter((ev) => ev.id !== editingEventId));
+
+    const { error } = await supabase
+      .from("calendar_events")
+      .delete()
+      .eq("id", editingEventId);
+
+    if (error) {
+      console.warn("Errore cancellazione evento", error);
+      alert(
+        `Errore durante l'eliminazione dell'evento${
+          (error as any)?.message ? `: ${(error as any).message}` : ""
+        }`
+      );
+      setEvents(previous);
+    }
+
     setIsSheetOpen(false);
+  };
+
+  const handleShareEvent = async (): Promise<void> => {
+    if (!editingEventId) return;
+    const ev = events.find((e) => e.id === editingEventId);
+    if (!ev) return;
+
+    const dateLabel = new Intl.DateTimeFormat("it-IT", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    }).format(new Date(ev.date));
+    const timeLabel = ev.time ? ` alle ${ev.time}` : "";
+    const whoLabel =
+      ev.scope === "couple"
+        ? " (evento di coppia)"
+        : ev.createdByProfileId === currentUserId
+        ? " (mio)"
+        : " (partner)";
+
+    const text = `${ev.title}${timeLabel} - ${dateLabel}${whoLabel}`;
+
+    try {
+      const nav: any =
+        typeof navigator !== "undefined" ? (navigator as any) : null;
+
+      if (nav && typeof nav.share === "function") {
+        await nav.share({
+          title: ev.title,
+          text,
+        });
+      } else if (
+        nav &&
+        nav.clipboard &&
+        typeof nav.clipboard.writeText === "function"
+      ) {
+        await nav.clipboard.writeText(text);
+        alert("Dettagli evento copiati negli appunti.");
+      } else {
+        alert(text);
+      }
+    } catch (err) {
+      console.warn("Errore condivisione evento", err);
+      alert("Non sono riuscito a condividere l'evento.");
+    }
   };
 
   return (
@@ -347,7 +625,9 @@ export default function CalendarPage(): ReactElement {
       {/* Filtri */}
       <section className="px-4 pb-3">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-slate-400">Filtra impegni</span>
+          <span className="text-xs text-slate-400">
+            Filtra impegni {isLoading && "(caricamento...)"}
+          </span>
           <button
             type="button"
             className="text-[11px] underline text-slate-400"
@@ -479,8 +759,8 @@ export default function CalendarPage(): ReactElement {
             {eventsForSelectedDay.map((event) => {
               const category = getEventCategory(
                 event,
-                CURRENT_USER_ID,
-                PARTNER_PROFILE_ID
+                currentUserId,
+                partnerProfileId
               );
 
               const badge =
@@ -521,9 +801,9 @@ export default function CalendarPage(): ReactElement {
         )}
       </section>
 
-      {/* Bottom sheet crea/modifica evento */}
+      {/* Schermata evento a tutta pagina */}
       {isSheetOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50">
+        <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/50">
           <div
             className="absolute inset-0"
             onClick={closeEventSheet}
@@ -531,13 +811,10 @@ export default function CalendarPage(): ReactElement {
           />
           <form
             onSubmit={handleSubmitEvent}
-            className="relative w-full max-w-md mx-auto rounded-t-3xl bg-slate-950 border-t border-slate-800 px-4 pt-3 pb-5 shadow-2xl"
+            className="relative w-full max-w-md mx-auto h-full bg-slate-950 border-l border-r border-slate-800 px-4 pt-4 pb-4 shadow-2xl flex flex-col"
           >
-            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-700" />
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-medium">
-                {sheetMode === "create" ? "Nuovo evento" : "Modifica evento"}
-              </span>
+            {/* Header dettaglio */}
+            <div className="flex items-center justify-between mb-4">
               <button
                 type="button"
                 className="text-[11px] text-slate-400"
@@ -545,19 +822,48 @@ export default function CalendarPage(): ReactElement {
               >
                 Chiudi
               </button>
+              <span className="text-sm font-medium">
+                {sheetMode === "create" ? "Nuovo evento" : "Dettaglio evento"}
+              </span>
+              <span className="w-10" />
             </div>
 
-            <div className="space-y-3">
+            {/* Contenuto */}
+            <div className="flex-1 flex flex-col gap-3">
               <div className="flex flex-col gap-1">
                 <label className="text-[11px] text-slate-400">Titolo</label>
                 <input
                   type="text"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
+                  disabled={sheetMode === "edit" && !isEditingExisting}
                   placeholder="Es. Cena, visita, appuntamento..."
-                  className="w-full rounded-2xl bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400/60"
-                  autoFocus
+                  className={`w-full rounded-2xl border px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400/60 ${
+                    sheetMode === "edit" && !isEditingExisting
+                      ? "bg-slate-900 border-slate-800 text-slate-300"
+                      : "bg-slate-900 border-slate-700"
+                  }`}
                 />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-slate-400">
+                  Data evento
+                </label>
+                <input
+                  type="date"
+                  value={eventDate}
+                  onChange={(e) => setEventDate(e.target.value)}
+                  disabled={sheetMode === "edit" && !isEditingExisting}
+                  className={`w-40 rounded-2xl border px-3 py-2 text-sm text-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/60 ${
+                    sheetMode === "edit" && !isEditingExisting
+                      ? "bg-slate-900 border-slate-800 text-slate-300"
+                      : "bg-slate-900 border-slate-700"
+                  }`}
+                />
+                <span className="text-[10px] text-slate-500 capitalize">
+                  {eventDateLabel}
+                </span>
               </div>
 
               <div className="flex flex-col gap-1">
@@ -568,7 +874,12 @@ export default function CalendarPage(): ReactElement {
                   type="time"
                   value={newTime}
                   onChange={(e) => setNewTime(e.target.value)}
-                  className="w-32 rounded-2xl bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/60"
+                  disabled={sheetMode === "edit" && !isEditingExisting}
+                  className={`w-32 rounded-2xl border px-3 py-2 text-sm text-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/60 ${
+                    sheetMode === "edit" && !isEditingExisting
+                      ? "bg-slate-900 border-slate-800 text-slate-300"
+                      : "bg-slate-900 border-slate-700"
+                  }`}
                 />
               </div>
 
@@ -580,56 +891,91 @@ export default function CalendarPage(): ReactElement {
                   <ToggleChip
                     label="Io"
                     active={newOwner === "me"}
-                    onClick={() => setNewOwner("me")}
+                    onClick={() => {
+                      if (sheetMode === "edit" && !isEditingExisting) return;
+                      setNewOwner("me");
+                    }}
                     className="bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                    disabled={sheetMode === "edit" && !isEditingExisting}
                   />
                   <ToggleChip
                     label="Partner"
                     active={newOwner === "partner"}
-                    onClick={() => setNewOwner("partner")}
+                    onClick={() => {
+                      if (sheetMode === "edit" && !isEditingExisting) return;
+                      setNewOwner("partner");
+                    }}
                     className="bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                    disabled={sheetMode === "edit" && !isEditingExisting}
                   />
                   <ToggleChip
                     label="Coppia"
                     active={newOwner === "couple"}
-                    onClick={() => setNewOwner("couple")}
+                    onClick={() => {
+                      if (sheetMode === "edit" && !isEditingExisting) return;
+                      setNewOwner("couple");
+                    }}
                     className="bg-pink-500/20 text-pink-300 border-pink-500/40"
+                    disabled={sheetMode === "edit" && !isEditingExisting}
                   />
                 </div>
               </div>
+            </div>
 
-              <div className="flex items-center justify-between text-[11px] text-slate-400">
-                <span>Data</span>
-                <span className="font-medium capitalize">
-                  {selectedDateLabel}
-                </span>
-              </div>
-
-              <div className="mt-2 flex gap-2">
-                <button
-                  type="button"
-                  onClick={closeEventSheet}
-                  className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200"
-                >
-                  Annulla
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 rounded-2xl bg-slate-100 text-slate-900 px-3 py-2 text-sm font-medium disabled:opacity-40"
-                  disabled={!newTitle.trim()}
-                >
-                  {sheetMode === "create" ? "Salva" : "Aggiorna"}
-                </button>
-              </div>
-
-              {sheetMode === "edit" && (
-                <button
-                  type="button"
-                  onClick={handleDeleteEvent}
-                  className="mt-2 w-full rounded-2xl border border-red-500/60 bg-red-500/5 px-3 py-2 text-sm text-red-300"
-                >
-                  Elimina evento
-                </button>
+            {/* Bottoni azione */}
+            <div className="mt-4 space-y-2">
+              {sheetMode === "edit" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingExisting(true)}
+                      className="rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200"
+                    >
+                      Modifica evento
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-2xl bg-slate-100 text-slate-900 px-3 py-2 text-sm font-medium disabled:opacity-40"
+                      disabled={!isEditingExisting || !newTitle.trim()}
+                    >
+                      Salva evento
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDeleteEvent}
+                      className="rounded-2xl border border-red-500/60 bg-red-500/5 px-3 py-2 text-sm text-red-300"
+                    >
+                      Elimina evento
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShareEvent}
+                      className="rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+                    >
+                      Condividi evento
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={closeEventSheet}
+                    className="rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200"
+                  >
+                    Annulla
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-2xl bg-slate-100 text-slate-900 px-3 py-2 text-sm font-medium disabled:opacity-40"
+                    disabled={!newTitle.trim()}
+                  >
+                    Salva evento
+                  </button>
+                </div>
               )}
             </div>
           </form>
@@ -689,6 +1035,7 @@ interface ToggleChipProps {
   active: boolean;
   onClick: () => void;
   className: string;
+  disabled?: boolean;
 }
 
 function ToggleChip({
@@ -696,17 +1043,20 @@ function ToggleChip({
   active,
   onClick,
   className,
+  disabled,
 }: ToggleChipProps): ReactElement {
   const activeClasses = className;
-  const inactiveClasses = "bg-transparent text-slate-400 border border-transparent";
+  const inactiveClasses =
+    "bg-transparent text-slate-400 border border-transparent";
 
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`rounded-full px-2 py-1 text-center font-medium transition ${
         active ? activeClasses : inactiveClasses
-      }`}
+      } ${disabled ? "opacity-50" : ""}`}
     >
       {label}
     </button>
