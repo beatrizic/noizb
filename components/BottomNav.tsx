@@ -13,7 +13,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   {
     href: "/",
-    label: "Dashboard",
+    label: "Home",
     icon: "🏠",
   },
   {
@@ -25,6 +25,11 @@ const navItems: NavItem[] = [
     href: "/shopping",
     label: "Lista",
     icon: "🛒",
+  },
+    {
+    href: "/profile",
+    label: "Profilo",
+    icon: "👤",
   },
 ];
 

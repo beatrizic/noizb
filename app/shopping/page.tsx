@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 import { ProtectedPage } from "../../components/ProtectedPage";
 
@@ -13,6 +14,8 @@ type ShoppingItem = {
 };
 
 export default function ShoppingPage() {
+  const router = useRouter();
+
   const [coupleId, setCoupleId] = useState<string | null>(null);
   const [items, setItems] = useState<ShoppingItem[]>([]);
   const [newItem, setNewItem] = useState("");
@@ -31,7 +34,6 @@ export default function ShoppingPage() {
       setInfo(null);
 
       try {
-        // 1) Utente loggato
         const {
           data: { user },
           error: userError,
@@ -47,7 +49,6 @@ export default function ShoppingPage() {
 
         if (cancelled) return;
 
-        // 2) Trova la coppia dell’utente
         const { data: memberRows, error: memberError } = await supabase
           .from("couple_members")
           .select("couple_id")
@@ -61,7 +62,7 @@ export default function ShoppingPage() {
             setCoupleId(null);
             setItems([]);
             setInfo(
-              "Non hai ancora una coppia collegata. Vai nella pagina Partner per crearla e collegare il tuo partner."
+              "Non risulti ancora collegata a nessuna coppia. Vai nella pagina Profilo per crearla o collegarti."
             );
           }
           return;
@@ -72,7 +73,6 @@ export default function ShoppingPage() {
 
         setCoupleId(foundCoupleId);
 
-        // 3) Carica gli item della coppia
         const { data: shoppingRows, error: shoppingError } = await supabase
           .from("shopping_items")
           .select("id, label, done, category, urgent")
@@ -115,7 +115,7 @@ export default function ShoppingPage() {
     if (!newItem.trim()) return;
     if (!coupleId) {
       setInfo(
-        "Devi prima avere una coppia collegata. Vai nella pagina Partner."
+        "Devi prima avere una coppia collegata. Vai nella pagina Profilo."
       );
       return;
     }
@@ -202,23 +202,19 @@ export default function ShoppingPage() {
   return (
     <ProtectedPage>
       <div className="space-y-4">
-        <header className="space-y-1">
-          <h1 className="text-xl font-semibold text-slate-50">Lista acquisti</h1>
-          <p className="text-sm text-slate-400">
-            Aggiungi qualcosa tu o il tuo partner, e contrassegnate insieme ciò che
-            avete già comprato.
-          </p>
-        </header>
-
-        {/* Info stato coppia */}
-        {!coupleId && (
-          <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
-            Non risulti ancora collegata a nessuna coppia.  
-            Vai nella pagina <span className="font-semibold">Partner</span> per
-            creare o collegarti a una coppia: la lista acquisti sarà condivisa solo
-            tra voi due.
-          </div>
-        )}
+        {/* Header con indietro */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => router.back()}
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-slate-900/80 text-slate-200 hover:bg-slate-800"
+          >
+            ←
+          </button>
+          <h1 className="text-xl font-semibold text-slate-50">
+            Lista acquisti
+          </h1>
+        </div>
 
         {/* Form aggiunta elemento */}
         <form
@@ -230,7 +226,7 @@ export default function ShoppingPage() {
             placeholder={
               coupleId
                 ? "Es. Detersivo, pane, regalo..."
-                : "Prima collega una coppia nella pagina Partner..."
+                : "Prima collega una coppia nella pagina Profilo..."
             }
             className="flex-1 rounded-xl bg-slate-800/80 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-pink-500/60"
             value={newItem}
@@ -246,7 +242,6 @@ export default function ShoppingPage() {
           </button>
         </form>
 
-        {/* Messaggi di stato */}
         {loading && (
           <p className="text-sm text-slate-300">Caricamento lista...</p>
         )}
