@@ -23,6 +23,7 @@ export default function ProfilePage() {
 
   const [userEmail, setUserEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
 
   const [couple, setCouple] = useState<Couple | null>(null);
   const [memberCount, setMemberCount] = useState<number>(1);
@@ -39,6 +40,7 @@ export default function ProfilePage() {
   const [inviting, setInviting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [savingAnniversary, setSavingAnniversary] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -72,7 +74,7 @@ export default function ProfilePage() {
         // Profilo
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("display_name")
+          .select("display_name, avatar_url")
           .eq("user_id", user.id)
           .maybeSingle();
 
@@ -82,9 +84,10 @@ export default function ProfilePage() {
 
         if (!cancelled && profile) {
           setDisplayName(profile.display_name ?? "");
+          setAvatarUrl(profile.avatar_url ?? null);
         }
 
-        // Coppia
+        // Coppia: verifica se l'utente appartiene a una coppia
         const { data: memberRows, error: memberError } = await supabase
           .from("couple_members")
           .select("couple_id")
@@ -114,7 +117,7 @@ export default function ProfilePage() {
 
         if (coupleError) throw coupleError;
 
-        // Conta membri
+        // Conteggio membri
         const { data: members, error: membersError } = await supabase
           .from("couple_members")
           .select("id")
@@ -193,6 +196,66 @@ export default function ProfilePage() {
       setError(err.message ?? "Errore durante il salvataggio del profilo.");
     } finally {
       setSavingProfile(false);
+    }
+  }
+
+  async function handleAvatarChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingAvatar(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        setError("Sessione non valida, effettua di nuovo l'accesso.");
+        setUploadingAvatar(false);
+        return;
+      }
+
+      const fileExt = file.name.split(".").pop() ?? "jpg";
+      const filePath = `${user.id}/${Date.now()}.${fileExt}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("avatars")
+        .upload(filePath, file, {
+          cacheControl: "3600",
+          upsert: true,
+        });
+
+      if (uploadError) throw uploadError;
+
+      const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
+      const publicUrl = data.publicUrl;
+
+      const { error: upsertError } = await supabase
+        .from("profiles")
+        .upsert(
+          {
+            user_id: user.id,
+            display_name: displayName || null,
+            avatar_url: publicUrl,
+          },
+          { onConflict: "user_id" }
+        );
+
+      if (upsertError) throw upsertError;
+
+      setAvatarUrl(publicUrl);
+      setMessage("Foto profilo aggiornata.");
+    } catch (err: any) {
+      setError(
+        err.message ?? "Errore durante il caricamento dell'immagine profilo."
+      );
+    } finally {
+      setUploadingAvatar(false);
+      // resetto il value dell'input per poter ricaricare lo stesso file se serve
+      e.target.value = "";
     }
   }
 
@@ -379,11 +442,16 @@ export default function ProfilePage() {
 
       setMessage("Data anniversario salvata.");
     } catch (err: any) {
-      setError(err.message ?? "Errore durante il salvataggio dell'anniversario.");
+      setError(
+        err.message ?? "Errore durante il salvataggio dell'anniversario."
+      );
     } finally {
       setSavingAnniversary(false);
     }
   }
+
+  const profileInitial =
+    (displayName || userEmail || "?").trim().charAt(0).toUpperCase() || "?";
 
   return (
     <ProtectedPage>
@@ -413,11 +481,53 @@ export default function ProfilePage() {
 
         {!loading && (
           <>
-            {/* Profilo personale */}
+            {/* HERO profilo */}
+            <section className="rounded-2xl border border-white/5 bg-slate-900/80 px-5 py-6 text-center shadow-lg">
+              <div className="flex flex-col items-center gap-4">
+                <div className="relative">
+                  {avatarUrl ? (
+                    <img
+                      src={avatarUrl}
+                      alt={displayName || "Avatar utente"}
+                      className="h-24 w-24 rounded-full object-cover shadow-md"
+                    />
+                  ) : (
+                    <div className="flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-br from-pink-500 to-indigo-500 text-3xl font-semibold text-white shadow-md">
+                      {profileInitial}
+                    </div>
+                  )}
+
+                  <label className="absolute bottom-0 right-0 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-slate-950/90 text-xs font-semibold text-slate-50 ring-2 ring-slate-900/90 hover:bg-slate-800">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleAvatarChange}
+                    />
+                    {uploadingAvatar ? "…" : "✏️"}
+                  </label>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-lg font-semibold text-slate-50">
+                    {displayName || "Utente senza nome"}
+                  </p>
+                  <p className="text-xs text-slate-400">{userEmail}</p>
+                </div>
+              </div>
+            </section>
+
+            {/* Dati personali */}
             <section className="space-y-3 rounded-2xl border border-white/5 bg-slate-900/70 p-4">
-              <h2 className="text-sm font-semibold text-slate-100">
-                Dati personali
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-100">
+                  Dati personali
+                </h2>
+                <span className="rounded-full bg-slate-800 px-2 py-1 text-[10px] uppercase tracking-wide text-slate-400">
+                  Profilo
+                </span>
+              </div>
+
               <form onSubmit={handleSaveProfile} className="space-y-3">
                 <div className="space-y-1">
                   <label className="text-xs font-medium text-slate-300">
@@ -454,11 +564,22 @@ export default function ProfilePage() {
               </form>
             </section>
 
-            {/* Stato coppia */}
+            {/* Stato coppia & partner */}
             <section className="space-y-3 rounded-2xl border border-white/5 bg-slate-900/70 p-4">
-              <h2 className="text-sm font-semibold text-slate-100">
-                Coppia &amp; partner
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-100">
+                  Coppia &amp; partner
+                </h2>
+                <span
+                  className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-wide ${
+                    couple
+                      ? "bg-emerald-500/15 text-emerald-300"
+                      : "bg-slate-800 text-slate-400"
+                  }`}
+                >
+                  {couple ? "Coppia attiva" : "Nessuna coppia"}
+                </span>
+              </div>
 
               <div className="space-y-1 text-xs text-slate-300">
                 {couple ? (
@@ -511,8 +632,8 @@ export default function ProfilePage() {
                     </button>
                   </div>
                   <p className="text-[10px] text-slate-400">
-                    Questa data viene usata nella home per il conteggio dei giorni
-                    insieme.
+                    Questa data viene usata nella home per il conteggio dei
+                    giorni insieme.
                   </p>
                 </form>
               )}
@@ -579,7 +700,9 @@ export default function ProfilePage() {
 
                   {lastInvite && (
                     <div className="mt-2 rounded-xl bg-slate-900/80 p-2 text-[11px] text-slate-200">
-                      <p className="font-semibold text-slate-50">Ultimo invito</p>
+                      <p className="font-semibold text-slate-50">
+                        Ultimo invito
+                      </p>
                       <p className="mt-1">
                         Email partner:{" "}
                         <span className="font-medium">
@@ -593,9 +716,9 @@ export default function ProfilePage() {
                         </span>
                       </p>
                       <p className="mt-1 text-[10px] text-slate-400">
-                        Condividi questo codice con il tuo partner: dovrà inserirlo
-                        nella sezione &quot;Ho un codice invito&quot; dopo essersi
-                        registrato.
+                        Condividi questo codice con il tuo partner: dovrà
+                        inserirlo nella sezione &quot;Ho un codice invito&quot;
+                        dopo essersi registrato.
                       </p>
                     </div>
                   )}
