@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useState,
+  type FormEvent,
+  type ChangeEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 import { ProtectedPage } from "../../components/ProtectedPage";
@@ -41,6 +46,7 @@ export default function ProfilePage() {
   const [joining, setJoining] = useState(false);
   const [savingAnniversary, setSavingAnniversary] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [deletingCouple, setDeletingCouple] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -138,7 +144,9 @@ export default function ProfilePage() {
         if (!cancelled) {
           setCouple(coupleRow as Couple);
           setMemberCount(members ? members.length : 1);
-          setLastInvite(invites && invites.length > 0 ? (invites[0] as Invite) : null);
+          setLastInvite(
+            invites && invites.length > 0 ? (invites[0] as Invite) : null
+          );
           setAnniversaryDate(coupleRow?.anniversary_date ?? null);
         }
       } catch (err: any) {
@@ -163,7 +171,7 @@ export default function ProfilePage() {
     return Math.random().toString(36).substring(2, 8).toUpperCase();
   }
 
-  async function handleSaveProfile(e: React.FormEvent) {
+  async function handleSaveProfile(e: FormEvent) {
     e.preventDefault();
     setSavingProfile(true);
     setError(null);
@@ -179,15 +187,14 @@ export default function ProfilePage() {
         return;
       }
 
-      const { error: upsertError } = await supabase
-        .from("profiles")
-        .upsert(
-          {
-            user_id: user.id,
-            display_name: displayName || null,
-          },
-          { onConflict: "user_id" }
-        );
+      const { error: upsertError } = await supabase.from("profiles").upsert(
+        {
+          user_id: user.id,
+          display_name: displayName || null,
+          avatar_url: avatarUrl || null,
+        },
+        { onConflict: "user_id" }
+      );
 
       if (upsertError) throw upsertError;
 
@@ -199,7 +206,7 @@ export default function ProfilePage() {
     }
   }
 
-  async function handleAvatarChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleAvatarChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -228,21 +235,21 @@ export default function ProfilePage() {
           upsert: true,
         });
 
-      if (uploadError) throw uploadError;
+      if (uploadError) {
+        throw uploadError;
+      }
 
       const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
       const publicUrl = data.publicUrl;
 
-      const { error: upsertError } = await supabase
-        .from("profiles")
-        .upsert(
-          {
-            user_id: user.id,
-            display_name: displayName || null,
-            avatar_url: publicUrl,
-          },
-          { onConflict: "user_id" }
-        );
+      const { error: upsertError } = await supabase.from("profiles").upsert(
+        {
+          user_id: user.id,
+          display_name: displayName || null,
+          avatar_url: publicUrl,
+        },
+        { onConflict: "user_id" }
+      );
 
       if (upsertError) throw upsertError;
 
@@ -254,12 +261,12 @@ export default function ProfilePage() {
       );
     } finally {
       setUploadingAvatar(false);
-      // resetto il value dell'input per poter ricaricare lo stesso file se serve
+      // permettere di ricaricare lo stesso file se serve
       e.target.value = "";
     }
   }
 
-  async function handleCreateCouple(e: React.FormEvent) {
+  async function handleCreateCouple(e: FormEvent) {
     e.preventDefault();
     setCreatingCouple(true);
     setError(null);
@@ -285,13 +292,13 @@ export default function ProfilePage() {
         throw coupleError || new Error("Errore nella creazione della coppia.");
       }
 
-      const { error: memberError } = await supabase
-        .from("couple_members")
-        .insert({
+      const { error: memberError } = await supabase.from("couple_members").insert(
+        {
           couple_id: coupleInsert.id,
           user_id: user.id,
           role: "owner",
-        });
+        }
+      );
 
       if (memberError) throw memberError;
 
@@ -306,7 +313,7 @@ export default function ProfilePage() {
     }
   }
 
-  async function handleInvitePartner(e: React.FormEvent) {
+  async function handleInvitePartner(e: FormEvent) {
     e.preventDefault();
     setInviting(true);
     setError(null);
@@ -344,7 +351,7 @@ export default function ProfilePage() {
     }
   }
 
-  async function handleJoinByCode(e: React.FormEvent) {
+  async function handleJoinByCode(e: FormEvent) {
     e.preventDefault();
     setJoining(true);
     setError(null);
@@ -388,13 +395,13 @@ export default function ProfilePage() {
         return;
       }
 
-      const { error: memberError } = await supabase
-        .from("couple_members")
-        .insert({
+      const { error: memberError } = await supabase.from("couple_members").insert(
+        {
           couple_id: invite.couple_id,
           user_id: user.id,
           role: "partner",
-        });
+        }
+      );
 
       if (memberError) throw memberError;
 
@@ -424,7 +431,7 @@ export default function ProfilePage() {
     }
   }
 
-  async function handleSaveAnniversary(e: React.FormEvent) {
+  async function handleSaveAnniversary(e: FormEvent) {
     e.preventDefault();
     if (!couple || !anniversaryDate) return;
 
@@ -447,6 +454,71 @@ export default function ProfilePage() {
       );
     } finally {
       setSavingAnniversary(false);
+    }
+  }
+
+  async function handleDeleteCouple() {
+    if (!couple) return;
+
+    const confirmed = window.confirm(
+      "Sei sicura di voler eliminare la coppia? I profili verranno svincolati e dovrai ricreare la coppia se cambierai idea."
+    );
+    if (!confirmed) return;
+
+    setDeletingCouple(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        setError("Sessione non valida, effettua di nuovo l'accesso.");
+        setDeletingCouple(false);
+        return;
+      }
+
+      // Elimina tutti i membri della coppia
+      const { error: membersDeleteError } = await supabase
+        .from("couple_members")
+        .delete()
+        .eq("couple_id", couple.id);
+
+      if (membersDeleteError) throw membersDeleteError;
+
+      // Elimina eventuali inviti associati
+      const { error: invitesDeleteError } = await supabase
+        .from("couple_invites")
+        .delete()
+        .eq("couple_id", couple.id);
+
+      if (invitesDeleteError) throw invitesDeleteError;
+
+      // Elimina la coppia
+      const { error: coupleDeleteError } = await supabase
+        .from("couples")
+        .delete()
+        .eq("id", couple.id);
+
+      if (coupleDeleteError) throw coupleDeleteError;
+
+      // Reset stato UI
+      setCouple(null);
+      setMemberCount(1);
+      setLastInvite(null);
+      setAnniversaryDate(null);
+      setPartnerEmail("");
+      setInviteCodeInput("");
+
+      setMessage("Coppia eliminata. I profili sono stati svincolati.");
+    } catch (err: any) {
+      setError(
+        err.message ?? "Errore durante l'eliminazione della coppia."
+      );
+    } finally {
+      setDeletingCouple(false);
     }
   }
 
@@ -566,19 +638,32 @@ export default function ProfilePage() {
 
             {/* Stato coppia & partner */}
             <section className="space-y-3 rounded-2xl border border-white/5 bg-slate-900/70 p-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Coppia &amp; partner
-                </h2>
-                <span
-                  className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-wide ${
-                    couple
-                      ? "bg-emerald-500/15 text-emerald-300"
-                      : "bg-slate-800 text-slate-400"
-                  }`}
-                >
-                  {couple ? "Coppia attiva" : "Nessuna coppia"}
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    Coppia &amp; partner
+                  </h2>
+                  <span
+                    className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-wide ${
+                      couple
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {couple ? "Coppia attiva" : "Nessuna coppia"}
+                  </span>
+                </div>
+
+                {couple && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteCouple}
+                    disabled={deletingCouple}
+                    className="text-[11px] font-medium text-pink-300 underline-offset-2 hover:underline disabled:opacity-60"
+                  >
+                    {deletingCouple ? "Elimino coppia..." : "Elimina coppia"}
+                  </button>
+                )}
               </div>
 
               <div className="space-y-1 text-xs text-slate-300">
