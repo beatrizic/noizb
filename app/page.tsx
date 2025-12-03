@@ -8,14 +8,16 @@ import { ProtectedPage } from "../components/ProtectedPage";
 type UpcomingEvent = {
   id: string;
   title: string;
-  event_date: string; // YYYY-MM-DD
-  event_time: string | null;
+  start_at: string; // timestamptz ISO
+  all_day: boolean;
 };
 
 type ShoppingItem = {
   id: string;
   label: string;
   done: boolean;
+  urgent: boolean | null;
+  category: string | null;
 };
 
 function calculateDaysSince(dateStr: string | null): number | null {
@@ -43,11 +45,32 @@ function calculateDaysSince(dateStr: string | null): number | null {
   return diffDays;
 }
 
-export default function DashboardPage() {
+function formatEventDateTime(startAt: string, allDay: boolean): string {
+  const date = new Date(startAt);
+
+  const dayNames = ["Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"];
+  const monthNames = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+
+  const dayName = dayNames[date.getDay()];
+  const dayNum = String(date.getDate()).padStart(2, "0");
+  const monthName = monthNames[date.getMonth()];
+
+  if (allDay) {
+    return `${dayName} ${dayNum} ${monthName} · tutto il giorno`;
+  }
+
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+
+  return `${dayName} ${dayNum} ${monthName} · ${hours}:${minutes}`;
+}
+
+export default function DashboardPage(): JSX.Element {
   const router = useRouter();
 
   const [displayName, setDisplayName] = useState<string>("");
   const [coupleId, setCoupleId] = useState<string | null>(null);
+  const [coupleName, setCoupleName] = useState<string | null>(null);
   const [daysTogether, setDaysTogether] = useState<number | null>(null);
 
   const [events, setEvents] = useState<UpcomingEvent[]>([]);
@@ -62,7 +85,7 @@ export default function DashboardPage() {
   useEffect(() => {
     let cancelled = false;
 
-    async function loadHome() {
+    async function loadHome(): Promise<void> {
       setLoading(true);
       setError(null);
       setInfo(null);
@@ -123,10 +146,10 @@ export default function DashboardPage() {
 
         setCoupleId(foundCoupleId);
 
-        // 4) Dati coppia -> anniversary_date
+        // 4) Dati coppia -> anniversary_date + name
         const { data: coupleRow, error: coupleError } = await supabase
           .from("couples")
-          .select("anniversary_date")
+          .select("anniversary_date, name")
           .eq("id", foundCoupleId)
           .single();
 
@@ -136,17 +159,18 @@ export default function DashboardPage() {
 
         if (!cancelled) {
           setDaysTogether(calculateDaysSince(annDate));
+          setCoupleName(coupleRow?.name ?? null);
         }
 
-        // 5) Prossimi eventi (es. max 5, dal giorno corrente in poi)
-        const todayStr = new Date().toISOString().slice(0, 10);
+        // 5) Prossimi eventi da "calendario" (max 3, dal momento corrente in poi)
+        const nowIso = new Date().toISOString();
         const { data: eventRows, error: eventsError } = await supabase
-          .from("events")
-          .select("id, title, event_date, event_time")
+          .from("calendario")
+          .select("id, title, start_at, all_day, couple_id")
           .eq("couple_id", foundCoupleId)
-          .gte("event_date", todayStr)
-          .order("event_date", { ascending: true })
-          .limit(5);
+          .gte("start_at", nowIso)
+          .order("start_at", { ascending: true })
+          .limit(3);
 
         if (eventsError && eventsError.code !== "PGRST116") {
           throw eventsError;
@@ -157,16 +181,16 @@ export default function DashboardPage() {
             eventRows.map((row) => ({
               id: row.id as string,
               title: row.title as string,
-              event_date: row.event_date as string,
-              event_time: (row.event_time as string | null) ?? null,
+              start_at: row.start_at as string,
+              all_day: Boolean(row.all_day),
             }))
           );
         }
 
-        // 6) Lista acquisti (preview, max 5)
+        // 6) Lista acquisti (preview, max 5) da "shopping_items"
         const { data: shoppingRows, error: shoppingError } = await supabase
           .from("shopping_items")
-          .select("id, label, done")
+          .select("id, label, done, urgent, category")
           .eq("couple_id", foundCoupleId)
           .order("created_at", { ascending: true })
           .limit(5);
@@ -181,12 +205,18 @@ export default function DashboardPage() {
               id: row.id as string,
               label: row.label as string,
               done: !!row.done,
+              urgent: (row.urgent as boolean | null) ?? null,
+              category: (row.category as string | null) ?? null,
             }))
           );
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!cancelled) {
-          setError(err.message ?? "Errore nel caricamento della home.");
+          const message =
+            err instanceof Error
+              ? err.message
+              : "Errore nel caricamento della home.";
+          setError(message);
         }
       } finally {
         if (!cancelled) {
@@ -195,14 +225,14 @@ export default function DashboardPage() {
       }
     }
 
-    loadHome();
+    void loadHome();
 
     return () => {
       cancelled = true;
     };
   }, []);
 
-  async function toggleShoppingItem(id: string) {
+  async function toggleShoppingItem(id: string): Promise<void> {
     const item = shoppingItems.find((i) => i.id === id);
     if (!item) return;
 
@@ -219,31 +249,29 @@ export default function DashboardPage() {
       if (updateError) throw updateError;
 
       setShoppingItems((prev) =>
-        prev.map((i) =>
-          i.id === id ? { ...i, done: newDone } : i
-        )
+        prev.map((i) => (i.id === id ? { ...i, done: newDone } : i))
       );
-    } catch (err: any) {
-      setError(
-        err.message ?? "Errore durante l'aggiornamento della lista acquisti."
-      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Errore durante l'aggiornamento della lista acquisti.";
+      setError(message);
     } finally {
       setTogglingId(null);
     }
   }
 
   const greetingName = displayName || "lì";
+  const coupleLabel = coupleName ? `@${coupleName}` : "@noi_due";
 
   return (
     <ProtectedPage>
       <div className="space-y-6">
         {/* HEADER: nome app + ciao + giorni insieme */}
         <header className="space-y-2">
-          {/* QUI lascio il titolo app esattamente come ce l'hai ora nella tua UI.
-              Se nel tuo file precedente avevi qualcosa tipo "noizb" o simile in alto a sinistra,
-              mantieni lo stesso JSX che avevi lì. Qui metto solo un placeholder neutro. */}
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-            noizb
+          <div className="text-xs font-semibold uppercase tracking-wide text-pink-300">
+            NOIZB
           </div>
 
           <div className="space-y-1">
@@ -256,20 +284,22 @@ export default function DashboardPage() {
 
             {coupleId && daysTogether !== null && (
               <p className="text-sm text-slate-200">
-                stiamo insieme da{" "}
+                {coupleLabel} stiamo insieme da{" "}
                 <span className="font-semibold">{daysTogether}</span> giorni
               </p>
             )}
 
             {coupleId && daysTogether === null && (
               <p className="text-xs text-slate-400">
-                Imposta la data di anniversario nella sezione Profilo per vedere i giorni insieme.
+                Imposta la data di anniversario nella sezione Profilo per vedere i
+                giorni insieme.
               </p>
             )}
 
             {!coupleId && (
               <p className="text-xs text-slate-400">
-                Collega una coppia dalla sezione Profilo per vedere i giorni insieme e i dati condivisi.
+                Collega una coppia dalla sezione Profilo per vedere i giorni
+                insieme e i dati condivisi.
               </p>
             )}
           </div>
@@ -309,7 +339,8 @@ export default function DashboardPage() {
 
           {!loading && !coupleId && (
             <p className="text-xs text-slate-400">
-              Nessuna coppia collegata: collega un partner per usare il calendario di coppia.
+              Nessuna coppia collegata: collega un partner per usare il
+              calendario di coppia.
             </p>
           )}
 
@@ -323,8 +354,7 @@ export default function DashboardPage() {
                   {event.title}
                 </p>
                 <p className="text-xs text-slate-400">
-                  {event.event_date}
-                  {event.event_time ? ` · ${event.event_time}` : ""}
+                  {formatEventDateTime(event.start_at, event.all_day)}
                 </p>
               </div>
             ))}
@@ -354,7 +384,8 @@ export default function DashboardPage() {
 
           {!loading && coupleId && shoppingItems.length === 0 && (
             <p className="text-xs text-slate-400">
-              Nessun elemento in lista. Aggiungi qualcosa dalla pagina Lista acquisti.
+              Nessun elemento in lista. Aggiungi qualcosa dalla pagina Lista
+              acquisti.
             </p>
           )}
 
@@ -375,29 +406,37 @@ export default function DashboardPage() {
                   item.done ? "opacity-60 line-through" : ""
                 }`}
               >
-                <p className="text-sm text-slate-50">{item.label}</p>
-                <span
-                  className={
-                    "flex h-5 w-5 items-center justify-center rounded-full border text-[11px] " +
-                    (item.done
-                      ? "border-emerald-400 bg-emerald-500/20 text-emerald-300"
-                      : "border-slate-500 text-slate-500")
-                  }
-                >
-                  {togglingId === item.id
-                    ? "…"
-                    : item.done
-                    ? "✓"
-                    : ""}
-                </span>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-slate-50">{item.label}</p>
+                  {item.urgent && (
+                    <span className="rounded-full bg-pink-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-pink-300">
+                      urgente
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {item.category && (
+                    <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                      {item.category}
+                    </span>
+                  )}
+                  <span
+                    className={
+                      "flex h-5 w-5 items-center justify-center rounded-full border text-[11px] " +
+                      (item.done
+                        ? "border-emerald-400 bg-emerald-500/20 text-emerald-300"
+                        : "border-slate-500 text-slate-500")
+                    }
+                  >
+                    {togglingId === item.id ? "…" : item.done ? "✓" : ""}
+                  </span>
+                </div>
               </button>
             ))}
           </div>
         </section>
 
-        {/* NOTA: la barra multifunzione in basso (home, calendario, lista, profilo)
-           la gestiamo nel layout o in un componente BottomNav separato.
-           Qui ci limitiamo al contenuto della dashboard. */}
+        {/* Bottom nav gestita altrove */}
       </div>
     </ProtectedPage>
   );
