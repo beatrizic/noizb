@@ -12,12 +12,14 @@ type UpcomingEvent = {
   all_day: boolean;
 };
 
-type ShoppingItem = {
-  id: string;
-  label: string;
-  done: boolean;
-  urgent: boolean | null;
-  category: string | null;
+type CategorySummary = {
+  name: string;
+  count: number;
+};
+
+type ShoppingOverview = {
+  totalOpen: number;
+  categories: CategorySummary[];
 };
 
 function calculateDaysSince(dateStr: string | null): number | null {
@@ -87,9 +89,7 @@ export default function DashboardPage() {
   const [daysTogether, setDaysTogether] = useState<number | null>(null);
 
   const [events, setEvents] = useState<UpcomingEvent[]>([]);
-  const [shoppingItems, setShoppingItems] = useState<ShoppingItem[]>([]);
-
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [shoppingOverview, setShoppingOverview] = useState<ShoppingOverview | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -200,28 +200,41 @@ export default function DashboardPage() {
           );
         }
 
-        // 6) Lista acquisti (preview, max 5) da "shopping_items"
+        // 6) Riepilogo lista acquisti: categorie + conteggio (solo item non completati)
         const { data: shoppingRows, error: shoppingError } = await supabase
           .from("shopping_items")
-          .select("id, label, done, urgent, category")
+          .select("id, label, done, category")
           .eq("couple_id", foundCoupleId)
-          .order("created_at", { ascending: true })
-          .limit(5);
+          .eq("done", false);
 
         if (shoppingError && shoppingError.code !== "PGRST116") {
           throw shoppingError;
         }
 
         if (!cancelled && shoppingRows) {
-          setShoppingItems(
-            shoppingRows.map((row) => ({
-              id: row.id as string,
-              label: row.label as string,
-              done: !!row.done,
-              urgent: (row.urgent as boolean | null) ?? null,
-              category: (row.category as string | null) ?? null,
-            }))
-          );
+          const categoryMap = new Map<string, number>();
+
+          for (const row of shoppingRows) {
+            const raw = (row.category as string | null) ?? "";
+            const trimmed = raw.trim();
+            const label = trimmed === "" ? "Senza categoria" : trimmed;
+            const current = categoryMap.get(label) ?? 0;
+            categoryMap.set(label, current + 1);
+          }
+
+          const categories: CategorySummary[] = Array.from(categoryMap.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => a.name.localeCompare(b.name, "it"));
+
+          setShoppingOverview({
+            totalOpen: shoppingRows.length,
+            categories,
+          });
+        } else if (!cancelled) {
+          setShoppingOverview({
+            totalOpen: 0,
+            categories: [],
+          });
         }
       } catch (err: unknown) {
         if (!cancelled) {
@@ -245,36 +258,6 @@ export default function DashboardPage() {
     };
   }, []);
 
-  async function toggleShoppingItem(id: string): Promise<void> {
-    const item = shoppingItems.find((i) => i.id === id);
-    if (!item) return;
-
-    const newDone = !item.done;
-    setTogglingId(id);
-    setError(null);
-
-    try {
-      const { error: updateError } = await supabase
-        .from("shopping_items")
-        .update({ done: newDone })
-        .eq("id", id);
-
-      if (updateError) throw updateError;
-
-      setShoppingItems((prev) =>
-        prev.map((i) => (i.id === id ? { ...i, done: newDone } : i))
-      );
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : "Errore durante l'aggiornamento della lista acquisti.";
-      setError(message);
-    } finally {
-      setTogglingId(null);
-    }
-  }
-
   const greetingName = displayName || "lì";
   const coupleLabel = coupleName ? `${coupleName}` : "@noi_due";
 
@@ -291,7 +274,7 @@ export default function DashboardPage() {
             <p className="text-sm text-slate-300">
               Ciao{" "}
               <span className="font-semibold text-slate-50">
-                {greetingName}
+                {greetingName}!
               </span>
             </p>
 
@@ -374,11 +357,11 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* BLOCCO: Lista acquisti */}
+        {/* BLOCCO: Lista acquisti (overview per categorie) */}
         <section className="space-y-3 rounded-2xl border border-white/5 bg-slate-900/70 p-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-slate-100">
-              Lista acquisti
+              Cose da comprare
             </h2>
             <button
               type="button"
@@ -391,14 +374,7 @@ export default function DashboardPage() {
 
           {loading && (
             <p className="text-xs text-slate-400">
-              Carico la lista acquisti...
-            </p>
-          )}
-
-          {!loading && coupleId && shoppingItems.length === 0 && (
-            <p className="text-xs text-slate-400">
-              Nessun elemento in lista. Aggiungi qualcosa dalla pagina Lista
-              acquisti.
+              Carico le liste...
             </p>
           )}
 
@@ -408,45 +384,41 @@ export default function DashboardPage() {
             </p>
           )}
 
-          <div className="space-y-2">
-            {shoppingItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => toggleShoppingItem(item.id)}
-                disabled={togglingId === item.id}
-                className={`flex w-full items-center justify-between rounded-xl bg-slate-900/90 px-3 py-2 text-left ${
-                  item.done ? "opacity-60 line-through" : ""
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <p className="text-sm text-slate-50">{item.label}</p>
-                  {item.urgent && (
-                    <span className="rounded-full bg-pink-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-pink-300">
-                      urgente
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  {item.category && (
-                    <span className="text-[10px] uppercase tracking-wide text-slate-400">
-                      {item.category}
-                    </span>
-                  )}
-                  <span
-                    className={
-                      "flex h-5 w-5 items-center justify-center rounded-full border text-[11px] " +
-                      (item.done
-                        ? "border-emerald-400 bg-emerald-500/20 text-emerald-300"
-                        : "border-slate-500 text-slate-500")
-                    }
-                  >
-                    {togglingId === item.id ? "…" : item.done ? "✓" : ""}
-                  </span>
-                </div>
-              </button>
-            ))}
-          </div>
+          {!loading && coupleId && shoppingOverview && (
+            <>
+              {shoppingOverview.totalOpen === 0 ? (
+                <p className="text-xs text-slate-400">
+                  Nessun elemento da comprare. 🎉
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-300">
+                    Hai{" "}
+                    <span className="font-semibold text-slate-50">
+                      {shoppingOverview.totalOpen}
+                    </span>{" "}
+                    elementi da comprare.
+                  </p>
+
+                  <div className="flex flex-wrap gap-2">
+                    {shoppingOverview.categories.map((cat) => (
+                      <div
+                        key={cat.name}
+                        className="flex items-center gap-1 rounded-full bg-slate-900/90 px-3 py-1"
+                      >
+                        <span className="text-xs text-slate-50">
+                          {cat.name}
+                        </span>
+                        <span className="text-[10px] font-semibold text-pink-300">
+                          · {cat.count}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </section>
 
         {/* Bottom nav gestita altrove */}

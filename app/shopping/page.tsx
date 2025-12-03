@@ -13,6 +13,13 @@ type ShoppingItem = {
   urgent: boolean | null;
 };
 
+const FIXED_CATEGORIES = ["casa", "spesa", "viaggi", "altro"] as const;
+
+function isFixedCategoryName(name: string): boolean {
+  const trimmed = name.trim().toLowerCase();
+  return FIXED_CATEGORIES.some((c) => c.toLowerCase() === trimmed);
+}
+
 export default function ShoppingPage() {
   const router = useRouter();
 
@@ -25,13 +32,21 @@ export default function ShoppingPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // gestione categorie
+  // gestione categorie per aggiunta item
   const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [useNewCategory, setUseNewCategory] = useState<boolean>(false);
   const [newCategory, setNewCategory] = useState<string>("");
 
   // mostra/nascondi elementi spuntati
   const [showDone, setShowDone] = useState<boolean>(false);
+
+  // gestione modifica/eliminazione categorie (solo custom)
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
+  const [editingCategoryName, setEditingCategoryName] = useState<string>("");
+  const [categoryActionLoading, setCategoryActionLoading] =
+    useState<string | null>(null);
+
+  // ---------------------- CARICAMENTO INIZIALE ---------------------- //
 
   useEffect(() => {
     let cancelled = false;
@@ -118,23 +133,14 @@ export default function ShoppingPage() {
     };
   }, []);
 
-  // categorie disponibili, derivate dagli item
-  const categories = useMemo<string[]>(() => {
-    const set = new Set<string>();
-    for (const item of items) {
-      const cat = item.category?.trim();
-      if (cat) set.add(cat);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b, "it"));
-  }, [items]);
+  // ---------------------- RAGGRUPPAMENTO PER CATEGORIA ---------------------- //
 
-  // items raggruppati per categoria, con filtro "mostra spuntati"
   const groupedItems = useMemo(() => {
     const map = new Map<string, ShoppingItem[]>();
 
     for (const item of items) {
       if (!showDone && item.done) {
-        // se non devo mostrare i completati li salto
+        // non mostro gli spuntati se showDone = false
         continue;
       }
 
@@ -154,6 +160,8 @@ export default function ShoppingPage() {
 
     return { map, sortedCategories };
   }, [items, showDone]);
+
+  // ---------------------- AGGIUNTA ITEM ---------------------- //
 
   async function handleAddItem(e: React.FormEvent) {
     e.preventDefault();
@@ -180,8 +188,6 @@ export default function ShoppingPage() {
       }
 
       const label = newItem.trim();
-
-      // decido la categoria da associare al nuovo elemento
       const categoryValue = useNewCategory
         ? newCategory.trim()
         : selectedCategory.trim();
@@ -214,7 +220,6 @@ export default function ShoppingPage() {
       setItems((prev) => [...prev, newRow]);
       setNewItem("");
 
-      // se ho usato una nuova categoria, la imposto come selezionata e disattivo il campo
       if (useNewCategory && categoryValue) {
         setSelectedCategory(categoryValue);
         setNewCategory("");
@@ -226,6 +231,8 @@ export default function ShoppingPage() {
       setAdding(false);
     }
   }
+
+  // ---------------------- TOGGLE DONE ITEM ---------------------- //
 
   async function toggleItem(id: string) {
     const item = items.find((i) => i.id === id);
@@ -253,6 +260,121 @@ export default function ShoppingPage() {
       setTogglingId(null);
     }
   }
+
+  // ---------------------- MODIFICA / DELETE CATEGORIA CUSTOM ---------------------- //
+
+  function startEditCategory(catName: string) {
+    if (isFixedCategoryName(catName) || catName === "Senza categoria") return;
+    setEditingCategory(catName);
+    setEditingCategoryName(catName);
+  }
+
+  function cancelEditCategory() {
+    setEditingCategory(null);
+    setEditingCategoryName("");
+  }
+
+  async function handleRenameCategory(oldName: string) {
+    if (isFixedCategoryName(oldName) || oldName === "Senza categoria") {
+      cancelEditCategory();
+      return;
+    }
+
+    const trimmedNew = editingCategoryName.trim();
+    if (!trimmedNew || trimmedNew === oldName || !coupleId) {
+      cancelEditCategory();
+      return;
+    }
+
+    setError(null);
+    setCategoryActionLoading(oldName);
+
+    const prevItems = items;
+
+    // optimistic
+    setItems((prev) =>
+      prev.map((item) =>
+        (item.category?.trim() || "") === oldName
+          ? { ...item, category: trimmedNew }
+          : item
+      )
+    );
+
+    try {
+      const { error: updateError } = await supabase
+        .from("shopping_items")
+        .update({ category: trimmedNew })
+        .eq("couple_id", coupleId)
+        .eq("category", oldName);
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      cancelEditCategory();
+    } catch (err: any) {
+      setError(
+        err.message ??
+          "Errore durante la modifica della categoria. Modifica annullata."
+      );
+      setItems(prevItems);
+      cancelEditCategory();
+    } finally {
+      setCategoryActionLoading(null);
+    }
+  }
+
+  async function handleDeleteCategory(catName: string) {
+    if (isFixedCategoryName(catName) || catName === "Senza categoria") {
+      return;
+    }
+    if (!coupleId) return;
+
+    const confirmDelete = window.confirm(
+      `Vuoi davvero eliminare la categoria "${catName}"?\nGli elementi resteranno in lista ma senza categoria.`
+    );
+    if (!confirmDelete) return;
+
+    setError(null);
+    setCategoryActionLoading(catName);
+
+    const prevItems = items;
+
+    // optimistic: porto gli item a "Senza categoria" (category null)
+    setItems((prev) =>
+      prev.map((item) =>
+        (item.category?.trim() || "") === catName
+          ? { ...item, category: null }
+          : item
+      )
+    );
+
+    try {
+      const { error: updateError } = await supabase
+        .from("shopping_items")
+        .update({ category: null })
+        .eq("couple_id", coupleId)
+        .eq("category", catName);
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      if (editingCategory === catName) {
+        cancelEditCategory();
+      }
+    } catch (err: any) {
+      setError(
+        err.message ??
+          "Errore durante l'eliminazione della categoria. Modifica annullata."
+      );
+      setItems(prevItems);
+    } finally {
+      setCategoryActionLoading(null);
+    }
+  }
+
+  // ---------------------- RENDER ---------------------- //
 
   return (
     <ProtectedPage>
@@ -292,9 +414,9 @@ export default function ShoppingPage() {
                   disabled={!coupleId || adding}
                 >
                   <option value="">Senza categoria</option>
-                  {categories.map((cat) => (
+                  {FIXED_CATEGORIES.map((cat) => (
                     <option key={cat} value={cat}>
-                      {cat}
+                      {cat.charAt(0).toUpperCase() + cat.slice(1)}
                     </option>
                   ))}
                 </select>
@@ -303,7 +425,7 @@ export default function ShoppingPage() {
               {useNewCategory && (
                 <input
                   type="text"
-                  placeholder="Es. Lista spesa, Lista viaggi..."
+                  placeholder="Es. Lista regali, Casa Ikea..."
                   className="flex-1 rounded-xl bg-slate-800/80 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-pink-500/60"
                   value={newCategory}
                   onChange={(e) => setNewCategory(e.target.value)}
@@ -323,13 +445,17 @@ export default function ShoppingPage() {
                 }}
                 className="rounded-xl bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-50 hover:bg-slate-700"
               >
-                {useNewCategory ? "Usa elenco" : "Nuova lista"}
+                {useNewCategory ? "Usa lista fissa" : "Nuova lista"}
               </button>
             </div>
             <p className="text-[11px] text-slate-400">
-              Esempi: <span className="font-semibold">Lista spesa</span>,{" "}
-              <span className="font-semibold">Lista viaggi</span>,{" "}
-              <span className="font-semibold">Casa Ikea</span>…
+              Categorie fisse:{" "}
+              <span className="font-semibold">casa</span>,{" "}
+              <span className="font-semibold">spesa</span>,{" "}
+              <span className="font-semibold">viaggi</span>,{" "}
+              <span className="font-semibold">altro</span>. <br />
+              Le liste personalizzate le crei con “Nuova lista” e puoi
+              modificarle o eliminarle.
             </p>
           </div>
 
@@ -365,7 +491,7 @@ export default function ShoppingPage() {
             </p>
             <p className="text-[11px] text-slate-400">
               Quando spunti qualcosa sparisce dalla lista, ma puoi rivederlo
-              quando vuoi.
+              quando vuoi con “Mostra spuntati”.
             </p>
           </div>
           <button
@@ -380,12 +506,10 @@ export default function ShoppingPage() {
         {loading && (
           <p className="text-sm text-slate-300">Caricamento lista...</p>
         )}
-        {info && !error && (
-          <p className="text-xs text-slate-300">{info}</p>
-        )}
+        {info && !error && <p className="text-xs text-slate-300">{info}</p>}
         {error && <p className="text-xs text-pink-300">{error}</p>}
 
-        {/* Liste per categoria */}
+        {/* Liste per categoria con gestione categorie custom */}
         <div className="space-y-3">
           {!loading &&
             coupleId &&
@@ -400,14 +524,73 @@ export default function ShoppingPage() {
             const catItems = groupedItems.map.get(catName) ?? [];
             if (catItems.length === 0) return null;
 
+            const isEditing = editingCategory === catName;
+            const isBusy = categoryActionLoading === catName;
+            const isFixed = isFixedCategoryName(catName);
+
             return (
               <div
                 key={catName}
                 className="space-y-1 rounded-2xl border border-white/5 bg-slate-900/70 p-2"
               >
-                <p className="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                  {catName}
-                </p>
+                {/* Header categoria con azioni (solo per custom) */}
+                <div className="flex items-center justify-between px-1 pb-1">
+                  {!isEditing ? (
+                    <>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                        {catName}
+                      </p>
+                      {!isFixed && catName !== "Senza categoria" && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-slate-200 hover:bg-slate-700"
+                            onClick={() => startEditCategory(catName)}
+                            disabled={isBusy}
+                          >
+                            ✎ Modifica
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-red-200 hover:bg-red-700/70"
+                            onClick={() => void handleDeleteCategory(catName)}
+                            disabled={isBusy}
+                          >
+                            🗑 Elimina
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="flex w-full items-center gap-2">
+                      <input
+                        type="text"
+                        className="flex-1 rounded-xl bg-slate-800/80 px-3 py-1.5 text-xs text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-pink-500/60"
+                        value={editingCategoryName}
+                        onChange={(e) => setEditingCategoryName(e.target.value)}
+                        disabled={isBusy}
+                      />
+                      <button
+                        type="button"
+                        className="rounded-xl bg-pink-500 px-2 py-1 text-[10px] font-semibold text-white hover:bg-pink-400 disabled:opacity-60"
+                        onClick={() => void handleRenameCategory(catName)}
+                        disabled={isBusy}
+                      >
+                        Salva
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-xl bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-60"
+                        onClick={cancelEditCategory}
+                        disabled={isBusy}
+                      >
+                        Annulla
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Items della categoria */}
                 <div className="space-y-1">
                   {catItems.map((item) => (
                     <button
@@ -420,13 +603,9 @@ export default function ShoppingPage() {
                       }`}
                     >
                       <div>
-                        <p className="text-sm text-slate-50">
-                          {item.label}
-                        </p>
+                        <p className="text-sm text-slate-50">{item.label}</p>
                         {item.urgent && !item.done && (
-                          <p className="text-[11px] text-amber-300">
-                            Urgente
-                          </p>
+                          <p className="text-[11px] text-amber-300">Urgente</p>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
