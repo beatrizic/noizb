@@ -49,7 +49,20 @@ function formatEventDateTime(startAt: string, allDay: boolean): string {
   const date = new Date(startAt);
 
   const dayNames = ["Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"];
-  const monthNames = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+  const monthNames = [
+    "gen",
+    "feb",
+    "mar",
+    "apr",
+    "mag",
+    "giu",
+    "lug",
+    "ago",
+    "set",
+    "ott",
+    "nov",
+    "dic",
+  ];
 
   const dayName = dayNames[date.getDay()];
   const dayNum = String(date.getDate()).padStart(2, "0");
@@ -65,7 +78,7 @@ function formatEventDateTime(startAt: string, allDay: boolean): string {
   return `${dayName} ${dayNum} ${monthName} · ${hours}:${minutes}`;
 }
 
-export default function DashboardPage(): JSX.Element {
+export default function DashboardPage() {
   const router = useRouter();
 
   const [displayName, setDisplayName] = useState<string>("");
@@ -263,7 +276,7 @@ export default function DashboardPage(): JSX.Element {
   }
 
   const greetingName = displayName || "lì";
-  const coupleLabel = coupleName ? `@${coupleName}` : "@noi_due";
+  const coupleLabel = coupleName ? `${coupleName}` : "@noi_due";
 
   return (
     <ProtectedPage>
@@ -284,15 +297,15 @@ export default function DashboardPage(): JSX.Element {
 
             {coupleId && daysTogether !== null && (
               <p className="text-sm text-slate-200">
-                {coupleLabel} stiamo insieme da{" "}
-                <span className="font-semibold">{daysTogether}</span> giorni
+                stiamo insieme da{" "}
+                <span className="font-semibold">{daysTogether}</span> giorni!
               </p>
             )}
 
             {coupleId && daysTogether === null && (
               <p className="text-xs text-slate-400">
-                Imposta la data di anniversario nella sezione Profilo per vedere i
-                giorni insieme.
+                Imposta la data di anniversario nella sezione Profilo per vedere
+                i giorni insieme.
               </p>
             )}
 
